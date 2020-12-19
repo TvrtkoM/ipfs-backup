@@ -1,0 +1,6 @@
+.env
+files.json
+db.json
+dist/
+.keys/
+node_modules/

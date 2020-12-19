@@ -1,0 +1,28 @@
+{
+  "name": "ipfsbak",
+  "version": "1.0.0",
+  "description": "Backup your files onto ipfs encrypted with openpgp",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "Tvrtko Majstorovic",
+  "license": "MIT",
+  "dependencies": {
+    "crypto-js": "^4.0.0",
+    "ipfs-http-client": "^48.1.3",
+    "it-all": "^1.0.4",
+    "openpgp": "^4.10.8",
+    "typescript": "^4.1.2"
+  },
+  "devDependencies": {
+    "@types/crypto-js": "^4.0.1",
+    "@types/node-fetch": "^2.5.7",
+    "@types/openpgp": "^4.4.14",
+    "@typescript-eslint/eslint-plugin": "^4.10.0",
+    "@typescript-eslint/parser": "^4.10.0",
+    "dotenv": "^8.2.0",
+    "eslint": "^7.15.0",
+    "prettier-eslint": "^12.0.0"
+  }
+}
