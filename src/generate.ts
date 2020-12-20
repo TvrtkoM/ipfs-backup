@@ -4,9 +4,9 @@ import fs from 'fs';
 import * as openpgp from "openpgp";
 import path from "path";
 
-dotenv.config();
+import { KEYS_DIR } from './lib/constants';
 
-const KEYS_DIR = path.resolve(`${__dirname}/../.keys`);
+dotenv.config();
 
 if (fs.existsSync(KEYS_DIR)) {
   console.warn('Seems like the cryptographic keys are already generated');

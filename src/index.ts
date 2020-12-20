@@ -7,10 +7,9 @@ import IPFSClient from "ipfs-http-client";
 import { SHA256 } from "crypto-js";
 import all from 'it-all';
 
-dotenv.config();
+import { DB_PATH, KEYS_DIR } from './lib/constants';
 
-const KEYS_DIR = path.resolve(`${__dirname}/../.keys`);
-const DB_PATH = path.resolve(expandHomeDir("~/programming/js/ipfsbak/db.json"));
+dotenv.config();
 
 function readKey(fn: "public.key" | "private.key" | "rev.cert"): string {
   return fs.readFileSync(path.resolve(KEYS_DIR, fn), "utf-8");
