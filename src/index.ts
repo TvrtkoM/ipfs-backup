@@ -5,9 +5,9 @@ import path from "path";
 import dotenv from "dotenv";
 import IPFSClient from "ipfs-http-client";
 import { SHA256 } from "crypto-js";
-import all from 'it-all';
+import all from "it-all";
 
-import { DB_PATH, KEYS_DIR } from './lib/constants';
+import { DB_PATH, KEYS_DIR } from "./lib/constants";
 
 dotenv.config();
 
@@ -60,7 +60,7 @@ function expandHomeDir(pth: string): string {
 }
 
 class Db {
-  static id = 0;
+  private nextId: number;
 
   private ipfsClient = IPFSClient({ url: options.IPFS_CLIENT_URL });
 
@@ -68,7 +68,14 @@ class Db {
     private entries: DbEntry[] = [],
     private publicKey: openpgp.key.KeyResult,
     private privateKey: openpgp.key.KeyResult
-  ) {}
+  ) {
+    this.nextId = entries.reduce((id: number, entry: DbEntry) => {
+      if (id < entry.id) {
+        return entry.id;
+      }
+      return id;
+    }, 1);
+  }
 
   save(p: string) {
     fs.writeFileSync(p, JSON.stringify(this.entries), "utf-8");
@@ -90,10 +97,10 @@ class Db {
 
     item.cid = cid.toString();
     item.hash = h;
-    console.log('updated', item);
+    console.log("updated", item.filename);
   }
 
-  async add(filename: string): Promise<DbEntry> {
+  async add(filename: string): Promise<void> {
     const content = fs.readFileSync(filename);
     const h = SHA256(content.toString("binary")).toString();
 
@@ -106,35 +113,43 @@ class Db {
     const item: DbEntry = {
       hash: h,
       cid: cid,
-      id: Db.id++,
+      id: this.nextId++,
       filename: filename,
     };
 
-    return item;
+    this.entries = [...this.entries, item];
   }
 
   async sync(files: string[]) {
     for (const file of files) {
       if (!this.fileExists(file)) {
+        console.warn(`File ${file} doesn't exist, skipping upload...`);
         continue;
       }
       const eIdx = this.entries.findIndex((i) => i.filename === file);
       if (eIdx === -1) {
-        const newEntry = await this.add(file);
-        if (newEntry != null) this.entries = [...this.entries, newEntry];
+        await this.add(file);
       } else {
         await this.update(this.entries[eIdx].id, fs.readFileSync(file));
       }
     }
   }
 
-  async printAllEntries() {
+  async downloadAll() {
     for (const entry of this.entries) {
-      const encData = this.ipfsClient.cat(`/ipfs/${entry.cid}`);
-      const encString = (await all(encData)).toString();
-      const decrypted = await this.decrypt(encString);
-      console.log(entry.filename);
-      console.log(decrypted.toString('utf-8'));
+      if (fs.existsSync(entry.filename)) {
+        continue;
+      }
+      try {
+        const encData = this.ipfsClient.cat(`/ipfs/${entry.cid}`);
+        const encString = await all(encData);
+        const decrypted = await this.decrypt(encString.toString());
+        fs.writeFileSync(entry.filename, decrypted);
+
+        console.log(`${entry.filename} downladed`);
+      } catch(e) {
+        console.log(e);
+      }
     }
   }
 
@@ -150,7 +165,8 @@ class Db {
     const decrypted = await openpgp.decrypt({
       message: await openpgp.message.readArmored(armored),
       privateKeys: this.privateKey.keys[0],
-    })
+      format: 'binary',
+    });
     return Buffer.from(decrypted.data);
   }
 
@@ -166,7 +182,6 @@ class DbFactory {
     publicKey: openpgp.key.KeyResult;
     privateKey: openpgp.key.KeyResult;
   }): Db {
-    // read entries from db.json. If a file doesn't exist create an empty array for entries
     const dbExists = fs.existsSync(DbFactory.dbPath);
     if (!dbExists) {
       return new Db([], options.publicKey, options.privateKey);
@@ -194,7 +209,7 @@ class DbFactory {
 
   await db.sync(files);
 
-  await db.printAllEntries();
+  await db.downloadAll();
 
   DbFactory.save(db);
 })();
