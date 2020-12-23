@@ -1,4 +1,4 @@
-// running this script removes db.json and unpins all files on ipfs
+// running this script removes db.json and unpins all files from ipfs
 import fs from "fs";
 import dotenv from "dotenv";
 import IPFSClient from "ipfs-http-client";
@@ -14,7 +14,7 @@ const ipfsClient = IPFSClient({ url: process.env['IPFS_CLIENT_URL'] });
     console.warn('Nothing to clean. No database file');
     process.exit();
   }
-  const entries: {filename: string; cid: string}[] = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+  const entries: {filename: string; cid: string}[] = JSON.parse(fs.readFileSync(DB_PATH, 'utf8')).entries;
 
   entries.forEach(async (e) => {
     await ipfsClient.pin.rm(`/ipfs/${e.cid}`);

@@ -1,43 +1,41 @@
-import * as openpgp from "openpgp";
 import fs from "fs";
 import os from "os";
-import path from "path";
 import dotenv from "dotenv";
 import IPFSClient from "ipfs-http-client";
-import { SHA256 } from "crypto-js";
 import all from "it-all";
+import crypto from "crypto";
 
-import { DB_PATH, KEYS_DIR } from "./lib/constants";
+import { DB_PATH } from "./lib/constants";
 
 dotenv.config();
 
-function readKey(fn: "public.key" | "private.key" | "rev.cert"): string {
-  return fs.readFileSync(path.resolve(KEYS_DIR, fn), "utf-8");
-}
-
-const publicArKey = readKey("public.key");
-const privateArKey = readKey("private.key");
-// const revCertAr = readKey('rev.cert');
-
-interface DbEntry {
+interface DatabaseEntry {
   id: number;
   filename: string;
   cid: string;
   hash: string;
 }
 
-interface Options {
+interface DatabaseJson {
+  salt: string;
+  iv: string;
+  entries: DatabaseEntry[];
+}
+
+interface Environment {
   FILES_CONFIG: string;
+  PASSWORD: string;
   IPFS_CLIENT_URL: string;
 }
 
-function parseEnvironmentVariables(): Options {
-  const requiredOptionKeys: (keyof Options)[] = [
+function parseEnvironmentVariables(): Environment {
+  const requiredOptionKeys: (keyof Environment)[] = [
     "FILES_CONFIG",
+    "PASSWORD",
     "IPFS_CLIENT_URL",
   ];
 
-  const fillOptions: Partial<Options> = {};
+  const env: Partial<Environment> = {};
   for (const k of requiredOptionKeys) {
     if (process.env[k] == null) {
       console.warn(
@@ -45,12 +43,12 @@ function parseEnvironmentVariables(): Options {
       );
       process.exit();
     }
-    fillOptions[k] = process.env[k];
+    env[k] = process.env[k];
   }
-  return fillOptions as Options;
+  return env as Environment;
 }
 
-const options = parseEnvironmentVariables();
+const environment = parseEnvironmentVariables();
 
 function expandHomeDir(pth: string): string {
   if (pth[0] === "~") {
@@ -59,31 +57,33 @@ function expandHomeDir(pth: string): string {
   return pth;
 }
 
-class Db {
+class Database {
   private nextId: number;
 
-  private ipfsClient = IPFSClient({ url: options.IPFS_CLIENT_URL });
+  private ipfsClient = IPFSClient({ url: environment.IPFS_CLIENT_URL });
 
   constructor(
-    private entries: DbEntry[] = [],
-    private publicKey: openpgp.key.KeyResult,
-    private privateKey: openpgp.key.KeyResult
+    private entries: DatabaseEntry[] = [],
+    private key: Buffer,
+    private iv: string
   ) {
-    this.nextId = entries.reduce((id: number, entry: DbEntry) => {
+    this.nextId = entries.reduce((id: number, entry: DatabaseEntry) => {
       if (id < entry.id) {
         return entry.id;
       }
-      return id;
+      return id + 1;
     }, 1);
   }
 
-  save(p: string) {
-    fs.writeFileSync(p, JSON.stringify(this.entries), "utf-8");
+  getEntries(): DatabaseEntry[] {
+    return this.entries;
   }
 
   async update(id: number, content: Buffer) {
-    const h = SHA256(content.toString("binary")).toString();
-    const item: DbEntry | undefined = this.entries.find((i) => i.id === id);
+    const h = this.calculateHash(content);
+    const item: DatabaseEntry | undefined = this.entries.find(
+      (i) => i.id === id
+    );
     if (item == null || h === item?.hash) {
       return;
     }
@@ -102,7 +102,7 @@ class Db {
 
   async add(filename: string): Promise<void> {
     const content = fs.readFileSync(filename);
-    const h = SHA256(content.toString("binary")).toString();
+    const h = this.calculateHash(content);
 
     const encrypted = await this.encrypt(content);
 
@@ -110,7 +110,7 @@ class Db {
       await this.ipfsClient.add({ content: encrypted }, { pin: true })
     ).cid.toString();
 
-    const item: DbEntry = {
+    const item: DatabaseEntry = {
       hash: h,
       cid: cid,
       id: this.nextId++,
@@ -118,6 +118,13 @@ class Db {
     };
 
     this.entries = [...this.entries, item];
+  }
+
+  private calculateHash(content: Buffer): string {
+    return crypto
+      .createHash("sha256")
+      .update(content.toString("binary"))
+      .digest("hex");
   }
 
   async sync(files: string[]) {
@@ -128,6 +135,7 @@ class Db {
       }
       const eIdx = this.entries.findIndex((i) => i.filename === file);
       if (eIdx === -1) {
+        console.log("adding file", file);
         await this.add(file);
       } else {
         await this.update(this.entries[eIdx].id, fs.readFileSync(file));
@@ -142,32 +150,53 @@ class Db {
       }
       try {
         const encData = this.ipfsClient.cat(`/ipfs/${entry.cid}`);
-        const encString = await all(encData);
-        const decrypted = await this.decrypt(encString.toString());
+        const enc = Buffer.concat(await all(encData));
+        const decrypted = await this.decrypt(enc.toString().trimEnd());
         fs.writeFileSync(entry.filename, decrypted);
 
         console.log(`${entry.filename} downladed`);
-      } catch(e) {
+      } catch (e) {
         console.log(e);
       }
     }
   }
 
-  private async encrypt(content: Buffer): Promise<Buffer> {
-    const encrypted = await openpgp.encrypt({
-      message: openpgp.message.fromBinary(content),
-      publicKeys: this.publicKey.keys,
+  private encrypt(content: Buffer): Promise<string> {
+    const cipher = crypto.createCipheriv("aes192", this.key, this.iv);
+    return new Promise((resolve) => {
+      let encrypted = "";
+      cipher.on("readable", () => {
+        let chunk;
+        while ((chunk = cipher.read()) != null) {
+          encrypted += chunk.toString("hex");
+        }
+      });
+      cipher.on("end", () => resolve(encrypted));
+      cipher.write(content);
+      cipher.end();
     });
-    return Buffer.from(encrypted.data);
   }
 
-  private async decrypt(armored: string): Promise<Buffer> {
-    const decrypted = await openpgp.decrypt({
-      message: await openpgp.message.readArmored(armored),
-      privateKeys: this.privateKey.keys[0],
-      format: 'binary',
+  private decrypt(content: string): Promise<Buffer> {
+    const decipher = crypto.createDecipheriv("aes192", this.key, this.iv);
+    return new Promise<Buffer>((resolve) => {
+      let decrypted: Buffer;
+      decipher.on("readable", () => {
+        let chunk: Buffer;
+        while ((chunk = decipher.read()) != null) {
+          if (!decrypted) {
+            decrypted = chunk;
+          } else {
+            decrypted = Buffer.concat([decrypted, chunk]);
+          }
+        }
+      });
+      decipher.on("end", () => {
+        resolve(decrypted);
+      });
+      decipher.write(content, "hex");
+      decipher.end();
     });
-    return Buffer.from(decrypted.data);
   }
 
   private fileExists(pth: string): boolean {
@@ -175,42 +204,57 @@ class Db {
   }
 }
 
-class DbFactory {
+class DatabaseFactory {
   private static dbPath = DB_PATH;
+  private static salt: string;
+  private static iv: string;
 
-  static createDb(options: {
-    publicKey: openpgp.key.KeyResult;
-    privateKey: openpgp.key.KeyResult;
-  }): Db {
-    const dbExists = fs.existsSync(DbFactory.dbPath);
+  static createDb(password: string): Database {
+    const dbExists = fs.existsSync(DatabaseFactory.dbPath);
     if (!dbExists) {
-      return new Db([], options.publicKey, options.privateKey);
+      const salt = crypto.randomBytes(2).toString("hex");
+      DatabaseFactory.salt = salt;
+
+      const iv = crypto.randomBytes(8).toString("hex");
+      DatabaseFactory.iv = iv;
+
+      const key = crypto.scryptSync(password, DatabaseFactory.salt, 24);
+      return new Database([], key, DatabaseFactory.iv);
     }
-    const entries: DbEntry[] = JSON.parse(
-      fs.readFileSync(DbFactory.dbPath, "utf8")
+    const databaseJson: DatabaseJson = JSON.parse(
+      fs.readFileSync(DatabaseFactory.dbPath, "utf8")
     );
-    return new Db(entries, options.publicKey, options.privateKey);
+
+    DatabaseFactory.salt = databaseJson.salt;
+    DatabaseFactory.iv = databaseJson.iv;
+
+    const key = crypto.scryptSync(password, databaseJson.salt, 24);
+
+    const entries: DatabaseEntry[] = databaseJson.entries;
+    return new Database(entries, key, DatabaseFactory.iv);
   }
 
-  static save(db: Db) {
-    db.save(DbFactory.dbPath);
+  static save(db: Database) {
+    const dbJson: DatabaseJson = {
+      salt: DatabaseFactory.salt,
+      iv: DatabaseFactory.iv,
+      entries: db.getEntries(),
+    };
+    fs.writeFileSync(DatabaseFactory.dbPath, JSON.stringify(dbJson));
   }
 }
 
 (async () => {
   const files: string[] = JSON.parse(
-    fs.readFileSync(options.FILES_CONFIG, "utf8")
+    fs.readFileSync(environment.FILES_CONFIG, "utf8")
   ).map((f: string) => expandHomeDir(f));
 
-  const db = DbFactory.createDb({
-    publicKey: await openpgp.key.readArmored(publicArKey),
-    privateKey: await openpgp.key.readArmored(privateArKey),
-  });
+  const db = DatabaseFactory.createDb(environment.PASSWORD);
 
   await db.sync(files);
 
   await db.downloadAll();
 
-  DbFactory.save(db);
+  DatabaseFactory.save(db);
 })();
 
